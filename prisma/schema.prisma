@@ -1,0 +1,183 @@
+// Release Tracker data model.
+//
+// Hierarchy: Client -> Tracker -> Requirement -> LinkedWorkItem (1..N per Requirement).
+// A Requirement's status is DERIVED (see syncService) from the ADO state of all
+// its LinkedWorkItems, never set directly by a user.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      String   @default("admin")
+  createdAt DateTime @default(now())
+}
+
+model Client {
+  id     String @id @default(cuid())
+  name   String @unique
+
+  // Slack -- one channel per client (confirmed).
+  slackChannelId   String?
+  slackChannelName String?
+
+  // Azure DevOps connection for this client's board.
+  adoOrgUrl           String? // e.g. https://dev.azure.com/myorg
+  adoProject          String?
+  adoAreaPath         String?
+  adoPatEncrypted     String? // encrypted at rest, see src/lib/crypto.ts
+  // Which ADO [System.State] values count as "terminal / done" for this client's
+  // board -- boards use different workflow names (Done, Closed, Resolved...).
+  adoDoneStates       String[] @default(["Done"])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  trackers Tracker[]
+}
+
+model Tracker {
+  id       String @id @default(cuid())
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name     String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  requirements Requirement[]
+
+  @@unique([clientId, name])
+}
+
+enum RequirementStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  DONE
+}
+
+model Requirement {
+  id        String            @id @default(cuid())
+  trackerId String
+  tracker   Tracker           @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+
+  title       String
+  description String?
+
+  // Derived by syncService.recomputeRequirementStatus -- never written directly
+  // from a user-facing "set status" action.
+  status RequirementStatus @default(NOT_STARTED)
+  doneAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  linkedWorkItems LinkedWorkItem[]
+  releaseNotes    ReleaseNote[]
+  statusEvents    StatusEvent[]
+}
+
+model LinkedWorkItem {
+  id            String      @id @default(cuid())
+  requirementId String
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  adoId Int // Azure DevOps work item id
+
+  title                  String?
+  descriptionText        String?
+  acceptanceCriteriaText String?
+  adoState               String?
+  productOwner           String?
+  assignedTo             String?
+
+  lastSyncedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([requirementId, adoId])
+}
+
+enum ReleaseNoteStatus {
+  DRAFT // just generated, sits in the review queue
+  APPROVED // reviewed and approved by admin, queued to send
+  SENT
+  FAILED
+}
+
+model ReleaseNote {
+  id            String      @id @default(cuid())
+  requirementId String
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  // A Requirement can in principle be re-opened and re-completed later
+  // (e.g. a follow-up work item gets linked after the fact) -- version tracks that.
+  version Int               @default(1)
+  status  ReleaseNoteStatus @default(DRAFT)
+
+  category           String? // New Features / Enhancements / Bug Fixes
+  screens            String[]
+  problemStatement   String?
+  objective          String?
+  stepsToUse         String?
+  acceptanceCriteria String?
+
+  generatedAt DateTime  @default(now())
+  approvedAt  DateTime?
+  sentAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries DeliveryLog[]
+
+  @@unique([requirementId, version])
+}
+
+model DeliveryLog {
+  id            String      @id @default(cuid())
+  releaseNoteId String
+  releaseNote   ReleaseNote @relation(fields: [releaseNoteId], references: [id], onDelete: Cascade)
+
+  channel      String // "slack"
+  target       String // slack channel id
+  status       String // "success" | "failed"
+  errorMessage String?
+
+  attemptedAt DateTime @default(now())
+}
+
+model StatusEvent {
+  id            String      @id @default(cuid())
+  requirementId String
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  scope String // "requirement" | "linked_item"
+  adoId Int? // set when scope = "linked_item"
+
+  fromStatus String?
+  toStatus   String?
+  actor      String? // "system:eod_sync" | "admin" | future user id
+
+  occurredAt DateTime @default(now())
+}
+
+// One row per EOD sync run, for observability/debugging.
+model SyncRun {
+  id                     String    @id @default(cuid())
+  startedAt              DateTime  @default(now())
+  finishedAt             DateTime?
+  clientsSynced          Int       @default(0)
+  linkedItemsUpdated     Int       @default(0)
+  requirementsCompleted  Int       @default(0)
+  errors                 String[]  @default([])
+}
