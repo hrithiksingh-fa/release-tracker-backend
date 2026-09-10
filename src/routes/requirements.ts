@@ -72,6 +72,17 @@ requirementsRouter.get(
         releaseNotes: { orderBy: { version: "desc" } },
         statusEvents: { orderBy: { occurredAt: "desc" } },
         figmaReferences: { orderBy: { addedAt: "desc" } },
+        tracker: {
+          include: {
+            client: {
+              include: {
+                requirementWorkflow: {
+                  include: { stages: { orderBy: { position: "asc" }, include: { stage: true } } },
+                },
+              },
+            },
+          },
+        },
         ...stageInclude,
       },
     });

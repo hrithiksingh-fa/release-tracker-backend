@@ -33,7 +33,13 @@ trackersRouter.get(
   asyncRoute(async (req, res) => {
     const tracker = await prisma.tracker.findUnique({
       where: { id: req.params.id },
-      include: { client: true },
+      include: {
+        client: {
+          include: {
+            requirementWorkflow: { include: { stages: { orderBy: { position: "asc" }, include: { stage: true } } } },
+          },
+        },
+      },
     });
     if (!tracker) return res.status(404).json({ error: "Tracker not found" });
     res.json(tracker);
