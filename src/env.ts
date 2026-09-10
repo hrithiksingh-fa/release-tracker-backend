@@ -14,6 +14,8 @@ export const env = {
   credentialsEncryptionKey: process.env.CREDENTIALS_ENCRYPTION_KEY ?? "",
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
   slackBotToken: process.env.SLACK_BOT_TOKEN ?? "",
+  figmaAccessToken: process.env.FIGMA_ACCESS_TOKEN ?? "",
+  figmaTeamId: process.env.FIGMA_TEAM_ID ?? "",
   eodSyncCron: process.env.EOD_SYNC_CRON ?? "0 23 * * *",
   adminApiToken: process.env.ADMIN_API_TOKEN ?? "change-me",
 };

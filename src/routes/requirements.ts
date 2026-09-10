@@ -3,6 +3,8 @@ import { z } from "zod";
 import { prisma } from "../db.js";
 import { asyncRoute } from "../middleware/errorHandler.js";
 import { buildAdoClientFor } from "../services/adoConnection.js";
+import * as figma from "../integrations/figma/client.js";
+import { parseFigmaUrl } from "../integrations/figma/urlParsing.js";
 
 export const requirementsRouter = Router();
 
@@ -12,7 +14,11 @@ requirementsRouter.get(
     const requirements = await prisma.requirement.findMany({
       where: { trackerId: req.params.trackerId },
       orderBy: { createdAt: "desc" },
-      include: { linkedWorkItems: true, releaseNotes: { orderBy: { version: "desc" }, take: 1 } },
+      include: {
+        linkedWorkItems: true,
+        releaseNotes: { orderBy: { version: "desc" }, take: 1 },
+        figmaReferences: { orderBy: { addedAt: "desc" } },
+      },
     });
     res.json(requirements);
   })
@@ -43,6 +49,7 @@ requirementsRouter.get(
         linkedWorkItems: true,
         releaseNotes: { orderBy: { version: "desc" } },
         statusEvents: { orderBy: { occurredAt: "desc" } },
+        figmaReferences: { orderBy: { addedAt: "desc" } },
       },
     });
     if (!requirement) return res.status(404).json({ error: "Requirement not found" });
@@ -124,6 +131,46 @@ requirementsRouter.delete(
   "/requirements/:id/linked-work-items/:linkedId",
   asyncRoute(async (req, res) => {
     await prisma.linkedWorkItem.delete({ where: { id: req.params.linkedId } });
+    res.status(204).send();
+  })
+);
+
+// --- Figma references -------------------------------------------------------
+// Design references for a requirement -- paste a Figma file/frame URL, we
+// resolve it to a file key (+ optional node id) and cache a thumbnail.
+
+const attachFigmaSchema = z.object({ url: z.string().url() });
+
+requirementsRouter.post(
+  "/requirements/:id/figma-links",
+  asyncRoute(async (req, res) => {
+    const { url } = attachFigmaSchema.parse(req.body);
+    const parsed = parseFigmaUrl(url);
+    if (!parsed) return res.status(400).json({ error: "Not a recognizable Figma file URL." });
+
+    const file = await figma.getFile(parsed.fileKey);
+    const thumbnailUrl = parsed.nodeId
+      ? (await figma.getNodeImageUrl(parsed.fileKey, parsed.nodeId)) ?? file.thumbnailUrl
+      : file.thumbnailUrl;
+
+    const reference = await prisma.figmaReference.create({
+      data: {
+        requirementId: req.params.id,
+        fileKey: parsed.fileKey,
+        nodeId: parsed.nodeId,
+        fileName: file.name,
+        url,
+        thumbnailUrl,
+      },
+    });
+    res.status(201).json(reference);
+  })
+);
+
+requirementsRouter.delete(
+  "/requirements/:id/figma-links/:referenceId",
+  asyncRoute(async (req, res) => {
+    await prisma.figmaReference.delete({ where: { id: req.params.referenceId } });
     res.status(204).send();
   })
 );

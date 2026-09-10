@@ -80,9 +80,27 @@ model Requirement {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  linkedWorkItems LinkedWorkItem[]
-  releaseNotes    ReleaseNote[]
-  statusEvents    StatusEvent[]
+  linkedWorkItems  LinkedWorkItem[]
+  releaseNotes     ReleaseNote[]
+  statusEvents     StatusEvent[]
+  figmaReferences  FigmaReference[]
+}
+
+// A design file (or a specific frame/node in one) attached to a Requirement for
+// reference. Figma access is org-level (one FIGMA_ACCESS_TOKEN, see env.ts), not
+// per-client, since design files aren't scoped to a single client's ADO board.
+model FigmaReference {
+  id            String      @id @default(cuid())
+  requirementId String
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  fileKey      String
+  nodeId       String? // set when the link points at a specific frame, not the whole file
+  fileName     String?
+  url          String // the original Figma URL as pasted
+  thumbnailUrl String?
+
+  addedAt DateTime @default(now())
 }
 
 model LinkedWorkItem {
