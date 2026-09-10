@@ -7,6 +7,8 @@ import { requirementsRouter } from "./routes/requirements.js";
 import { releaseNotesRouter } from "./routes/releaseNotes.js";
 import { syncRouter } from "./routes/sync.js";
 import { figmaRouter } from "./routes/figma.js";
+import { stagesRouter } from "./routes/stages.js";
+import { workflowsRouter } from "./routes/workflows.js";
 import { requireAdmin } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
@@ -25,6 +27,8 @@ export function createApp() {
   app.use("/", releaseNotesRouter);
   app.use("/", syncRouter);
   app.use("/", figmaRouter);
+  app.use("/", stagesRouter);
+  app.use("/", workflowsRouter);
 
   app.use(errorHandler);
   return app;

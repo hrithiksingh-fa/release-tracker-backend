@@ -5,8 +5,11 @@ import { asyncRoute } from "../middleware/errorHandler.js";
 import { buildAdoClientFor } from "../services/adoConnection.js";
 import * as figma from "../integrations/figma/client.js";
 import { parseFigmaUrl } from "../integrations/figma/urlParsing.js";
+import { generateDraftReleaseNote } from "../services/releaseNoteService.js";
 
 export const requirementsRouter = Router();
+
+const stageInclude = { stage: { include: { stage: true } } } as const;
 
 requirementsRouter.get(
   "/trackers/:trackerId/requirements",
@@ -18,6 +21,7 @@ requirementsRouter.get(
         linkedWorkItems: true,
         releaseNotes: { orderBy: { version: "desc" }, take: 1 },
         figmaReferences: { orderBy: { addedAt: "desc" } },
+        ...stageInclude,
       },
     });
     res.json(requirements);
@@ -27,14 +31,32 @@ requirementsRouter.get(
 const createRequirementSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
+  dueDate: z.string().datetime().optional(),
 });
 
 requirementsRouter.post(
   "/trackers/:trackerId/requirements",
   asyncRoute(async (req, res) => {
     const body = createRequirementSchema.parse(req.body);
+    const { dueDate, ...rest } = body;
+
+    // New requirements default to the first stage of their client's own
+    // requirement workflow -- the leftmost board column, same principle as a
+    // new Client starting at the PROJECT workflow's first stage.
+    const tracker = await prisma.tracker.findUniqueOrThrow({
+      where: { id: req.params.trackerId },
+      include: { client: { include: { requirementWorkflow: { include: { stages: { orderBy: { position: "asc" } } } } } } },
+    });
+    const firstStage = tracker.client.requirementWorkflow?.stages[0];
+
     const requirement = await prisma.requirement.create({
-      data: { ...body, trackerId: req.params.trackerId },
+      data: {
+        ...rest,
+        dueDate: dueDate ? new Date(dueDate) : undefined,
+        trackerId: req.params.trackerId,
+        stageId: firstStage?.id,
+      },
+      include: stageInclude,
     });
     res.status(201).json(requirement);
   })
@@ -50,6 +72,7 @@ requirementsRouter.get(
         releaseNotes: { orderBy: { version: "desc" } },
         statusEvents: { orderBy: { occurredAt: "desc" } },
         figmaReferences: { orderBy: { addedAt: "desc" } },
+        ...stageInclude,
       },
     });
     if (!requirement) return res.status(404).json({ error: "Requirement not found" });
@@ -61,8 +84,60 @@ requirementsRouter.patch(
   "/requirements/:id",
   asyncRoute(async (req, res) => {
     const body = createRequirementSchema.partial().parse(req.body);
-    const requirement = await prisma.requirement.update({ where: { id: req.params.id }, data: body });
+    const { dueDate, ...rest } = body;
+    const requirement = await prisma.requirement.update({
+      where: { id: req.params.id },
+      data: { ...rest, ...(dueDate !== undefined ? { dueDate: dueDate ? new Date(dueDate) : null } : {}) },
+      include: stageInclude,
+    });
     res.json(requirement);
+  })
+);
+
+const moveStageSchema = z.object({ stageId: z.string().min(1) }); // a WorkflowStage id
+
+// The only way a Requirement's stage changes -- fully manual, never touched
+// by ADO sync (see syncService.ts). Moving into a stage flagged isDoneStage
+// generates a release note draft; moving out of one clears doneAt.
+requirementsRouter.patch(
+  "/requirements/:id/stage",
+  asyncRoute(async (req, res) => {
+    const { stageId } = moveStageSchema.parse(req.body);
+    const previous = await prisma.requirement.findUniqueOrThrow({
+      where: { id: req.params.id },
+      include: { stage: { include: { stage: true } } },
+    });
+    const target = await prisma.workflowStage.findUniqueOrThrow({
+      where: { id: stageId },
+      include: { stage: true },
+    });
+
+    const requirement = await prisma.requirement.update({
+      where: { id: req.params.id },
+      data: { stageId, doneAt: target.stage.isDoneStage ? new Date() : null },
+      include: stageInclude,
+    });
+
+    await prisma.statusEvent.create({
+      data: {
+        requirementId: req.params.id,
+        scope: "requirement_stage",
+        fromStatus: previous.stage?.stage.name ?? null,
+        toStatus: target.stage.name,
+        actor: "admin",
+      },
+    });
+
+    let releaseNoteWarning: string | null = null;
+    if (target.stage.isDoneStage) {
+      try {
+        await generateDraftReleaseNote(req.params.id);
+      } catch (err) {
+        releaseNoteWarning = err instanceof Error ? err.message : "Failed to generate release note draft.";
+      }
+    }
+
+    res.json({ ...requirement, releaseNoteWarning });
   })
 );
 

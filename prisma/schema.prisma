@@ -1,8 +1,17 @@
 // Release Tracker data model.
 //
 // Hierarchy: Client -> Tracker -> Requirement -> LinkedWorkItem (1..N per Requirement).
-// A Requirement's status is DERIVED (see syncService) from the ADO state of all
-// its LinkedWorkItems, never set directly by a user.
+//
+// Stages/Workflows: Stage is a shared, reusable master list (e.g. "In Progress",
+// "Done") -- the same Stage row can appear in many Workflows. A Workflow is an
+// ordered sequence of Stages (via WorkflowStage, which also carries the position).
+// Two kinds of Workflow exist:
+//   - scope=PROJECT: exactly one, shared workflow governing which stage each
+//     Client/"project" sits in (the outer Kanban board).
+//   - scope=REQUIREMENT: one per Client, governing that client's Requirements.
+//     Built by cloning a template (see isTemplate) or another client's workflow.
+// Stage moves are fully manual (drag-and-drop / explicit action) -- ADO sync
+// never changes a Client's or Requirement's stage on its own (see syncService).
 
 generator client {
   provider = "prisma-client-js"
@@ -38,10 +47,72 @@ model Client {
   // board -- boards use different workflow names (Done, Closed, Resolved...).
   adoDoneStates       String[] @default(["Done"])
 
+  // Where this client/"project" sits on the single outer PROJECT-scope workflow.
+  // Set automatically to that workflow's first stage on client creation.
+  currentStageId String?
+  currentStage   WorkflowStage? @relation("ClientCurrentStage", fields: [currentStageId], references: [id])
+
+  // This client's own REQUIREMENT-scope workflow (1:1, via Workflow.ownerClientId).
+  // Cloned from a template or another client's workflow on client creation.
+  requirementWorkflow Workflow?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   trackers Tracker[]
+}
+
+model Stage {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  color       String? // hex, for the board UI
+  isDoneStage Boolean  @default(false) // moving into this stage triggers release-note generation
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workflowStages WorkflowStage[]
+}
+
+enum WorkflowScope {
+  PROJECT // the single shared workflow governing Client stage
+  REQUIREMENT // one per client, governing that client's Requirements
+}
+
+model Workflow {
+  id    String        @id @default(cuid())
+  name  String
+  scope WorkflowScope
+
+  // True for the seeded PROJECT workflow and the seeded default REQUIREMENT
+  // workflow -- these are the things "clone from" starts from when nothing
+  // more specific (another client's workflow) is picked.
+  isTemplate Boolean @default(false)
+
+  // Set only for scope=REQUIREMENT workflows that belong to a specific client.
+  // Null for the PROJECT workflow and for REQUIREMENT template workflows.
+  ownerClientId String? @unique
+  ownerClient   Client? @relation(fields: [ownerClientId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stages WorkflowStage[]
+}
+
+model WorkflowStage {
+  id         String   @id @default(cuid())
+  workflowId String
+  workflow   Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  stageId    String
+  stage      Stage    @relation(fields: [stageId], references: [id])
+  position   Int
+
+  requirements Requirement[]
+  clientsHere  Client[]      @relation("ClientCurrentStage")
+
+  @@unique([workflowId, stageId])
+  @@unique([workflowId, position])
 }
 
 model Tracker {
@@ -58,24 +129,21 @@ model Tracker {
   @@unique([clientId, name])
 }
 
-enum RequirementStatus {
-  NOT_STARTED
-  IN_PROGRESS
-  DONE
-}
-
 model Requirement {
-  id        String            @id @default(cuid())
+  id        String  @id @default(cuid())
   trackerId String
-  tracker   Tracker           @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  tracker   Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
 
   title       String
   description String?
+  dueDate     DateTime?
 
-  // Derived by syncService.recomputeRequirementStatus -- never written directly
-  // from a user-facing "set status" action.
-  status RequirementStatus @default(NOT_STARTED)
-  doneAt DateTime?
+  // Set only by an explicit stage-move action (drag-and-drop / API call) --
+  // never by ADO sync, which only updates LinkedWorkItem state. Nullable: a
+  // brand-new requirement has no stage until placed on the board.
+  stageId String?
+  stage   WorkflowStage? @relation(fields: [stageId], references: [id])
+  doneAt  DateTime? // set when moved into a stage with isDoneStage=true, cleared if moved out
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -179,23 +247,24 @@ model StatusEvent {
   requirementId String
   requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
 
-  scope String // "requirement" | "linked_item"
+  scope String // "requirement_stage" | "linked_item"
   adoId Int? // set when scope = "linked_item"
 
-  fromStatus String?
+  fromStatus String? // linked_item: ADO state name. requirement_stage: stage name.
   toStatus   String?
   actor      String? // "system:eod_sync" | "admin" | future user id
 
   occurredAt DateTime @default(now())
 }
 
-// One row per EOD sync run, for observability/debugging.
+// One row per EOD sync run, for observability/debugging. Sync only updates
+// LinkedWorkItem state now -- it never moves a Requirement's stage (that's a
+// manual action, see requirements.ts's PATCH /requirements/:id/stage).
 model SyncRun {
-  id                     String    @id @default(cuid())
-  startedAt              DateTime  @default(now())
-  finishedAt             DateTime?
-  clientsSynced          Int       @default(0)
-  linkedItemsUpdated     Int       @default(0)
-  requirementsCompleted  Int       @default(0)
-  errors                 String[]  @default([])
+  id                 String    @id @default(cuid())
+  startedAt          DateTime  @default(now())
+  finishedAt         DateTime?
+  clientsSynced      Int       @default(0)
+  linkedItemsUpdated Int       @default(0)
+  errors             String[]  @default([])
 }
