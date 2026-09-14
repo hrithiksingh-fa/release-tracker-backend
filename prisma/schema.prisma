@@ -1,17 +1,25 @@
 // Release Tracker data model.
 //
-// Hierarchy: Client -> Tracker -> Requirement -> LinkedWorkItem (1..N per Requirement).
+// Hierarchy: Client -> Phase -> Requirement -> LinkedWorkItem (1..N per Requirement).
+// ("Phase" was previously called "Tracker" -- a client's lifecycle stage, e.g.
+// Onboarding / Scaling 1 / Scaling 2, each with its own set of requirements.)
 //
 // Stages/Workflows: Stage is a shared, reusable master list (e.g. "In Progress",
 // "Done") -- the same Stage row can appear in many Workflows. A Workflow is an
 // ordered sequence of Stages (via WorkflowStage, which also carries the position).
-// Two kinds of Workflow exist:
-//   - scope=PROJECT: exactly one, shared workflow governing which stage each
-//     Client/"project" sits in (the outer Kanban board).
+// Three kinds of Workflow exist, matching the three entities a workflow can be
+// attached to:
+//   - scope=CLIENT: exactly one, shared workflow governing which stage each
+//     Client sits in (the outer Kanban board).
+//   - scope=PHASE: one per Client, governing that client's Phases.
 //   - scope=REQUIREMENT: one per Client, governing that client's Requirements.
-//     Built by cloning a template (see isTemplate) or another client's workflow.
+// PHASE/REQUIREMENT workflows are built by cloning a template (isTemplate) or
+// another client's workflow -- see workflowService.ts.
 // Stage moves are fully manual (drag-and-drop / explicit action) -- ADO sync
-// never changes a Client's or Requirement's stage on its own (see syncService).
+// never changes anything's stage on its own (see syncService).
+//
+// Audit: AuditLog is a generic field-level change log (see auditService.ts),
+// used for every edit to Client/Phase/Requirement -- not just stage moves.
 
 generator client {
   provider = "prisma-client-js"
@@ -31,42 +39,67 @@ model User {
 }
 
 model Client {
-  id     String @id @default(cuid())
-  name   String @unique
+  id   String @id @default(cuid())
+  name String @unique
+
+  description  String?
+  productOwner String?
+  deliveryDate DateTime?
 
   // Slack -- one channel per client (confirmed).
   slackChannelId   String?
   slackChannelName String?
 
-  // Azure DevOps connection for this client's board.
-  adoOrgUrl           String? // e.g. https://dev.azure.com/myorg
-  adoProject          String?
-  adoAreaPath         String?
-  adoPatEncrypted     String? // encrypted at rest, see src/lib/crypto.ts
+  // Azure DevOps connection for this client's board (items pulled through it
+  // are labeled "PBI" -- Product Backlog Item -- in the UI).
+  adoOrgUrl       String? // e.g. https://dev.azure.com/myorg
+  adoProject      String?
+  adoAreaPath     String?
+  adoPatEncrypted String? // encrypted at rest, see src/lib/crypto.ts
   // Which ADO [System.State] values count as "terminal / done" for this client's
   // board -- boards use different workflow names (Done, Closed, Resolved...).
-  adoDoneStates       String[] @default(["Done"])
+  adoDoneStates   String[] @default(["Done"])
 
-  // Where this client/"project" sits on the single outer PROJECT-scope workflow.
-  // Set automatically to that workflow's first stage on client creation.
+  modules Module[]
+
+  // Where this client sits on the single outer CLIENT-scope workflow. Set
+  // automatically to that workflow's first stage on client creation.
   currentStageId String?
   currentStage   WorkflowStage? @relation("ClientCurrentStage", fields: [currentStageId], references: [id])
 
-  // This client's own REQUIREMENT-scope workflow (1:1, via Workflow.ownerClientId).
-  // Cloned from a template or another client's workflow on client creation.
-  requirementWorkflow Workflow?
+  // This client's own PHASE-scope and REQUIREMENT-scope workflows (each 1:1).
+  // Cloned from a template (or another client's workflow) on client creation,
+  // or attached explicitly later from the admin panel.
+  phaseWorkflowId String? @unique
+  phaseWorkflow   Workflow? @relation("ClientPhaseWorkflow", fields: [phaseWorkflowId], references: [id])
+
+  requirementWorkflowId String? @unique
+  requirementWorkflow   Workflow? @relation("ClientRequirementWorkflow", fields: [requirementWorkflowId], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  trackers Tracker[]
+  phases Phase[]
+}
+
+// A product module a client uses (e.g. "Reporting", "Bulk Upload") -- shown as
+// a multi-select on the client form. Managed from the admin panel.
+model Module {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clients Client[]
 }
 
 model Stage {
-  id          String   @id @default(cuid())
-  name        String   @unique
+  id          String  @id @default(cuid())
+  name        String  @unique
   color       String? // hex, for the board UI
-  isDoneStage Boolean  @default(false) // moving into this stage triggers release-note generation
+  isDoneStage Boolean @default(false) // moving into this stage triggers release-note generation (requirement stages only)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -75,7 +108,8 @@ model Stage {
 }
 
 enum WorkflowScope {
-  PROJECT // the single shared workflow governing Client stage
+  CLIENT // the single shared workflow governing Client stage
+  PHASE // one per client, governing that client's Phases
   REQUIREMENT // one per client, governing that client's Requirements
 }
 
@@ -84,20 +118,20 @@ model Workflow {
   name  String
   scope WorkflowScope
 
-  // True for the seeded PROJECT workflow and the seeded default REQUIREMENT
-  // workflow -- these are the things "clone from" starts from when nothing
-  // more specific (another client's workflow) is picked.
+  // True for the seeded templates -- what "clone from" starts from when
+  // nothing more specific (another client's workflow) is picked.
   isTemplate Boolean @default(false)
-
-  // Set only for scope=REQUIREMENT workflows that belong to a specific client.
-  // Null for the PROJECT workflow and for REQUIREMENT template workflows.
-  ownerClientId String? @unique
-  ownerClient   Client? @relation(fields: [ownerClientId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   stages WorkflowStage[]
+
+  // Reverse of Client.phaseWorkflowId / requirementWorkflowId -- which
+  // client (if any) this workflow is attached to as their phase/requirement
+  // workflow. At most one of these is ever set for a given Workflow row.
+  clientUsingAsPhaseWorkflow       Client? @relation("ClientPhaseWorkflow")
+  clientUsingAsRequirementWorkflow Client? @relation("ClientRequirementWorkflow")
 }
 
 model WorkflowStage {
@@ -109,17 +143,27 @@ model WorkflowStage {
   position   Int
 
   requirements Requirement[]
+  phasesHere   Phase[]       @relation("PhaseCurrentStage")
   clientsHere  Client[]      @relation("ClientCurrentStage")
 
   @@unique([workflowId, stageId])
   @@unique([workflowId, position])
 }
 
-model Tracker {
+model Phase {
   id       String @id @default(cuid())
   clientId String
   client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
   name     String
+
+  description  String?
+  deliveryDate DateTime?
+
+  // Set only by an explicit stage-move action, drawn from the client's own
+  // PHASE-scope workflow. Nullable: exists briefly if that workflow has no
+  // stages yet.
+  stageId String?
+  stage   WorkflowStage? @relation("PhaseCurrentStage", fields: [stageId], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -129,14 +173,27 @@ model Tracker {
   @@unique([clientId, name])
 }
 
+enum RequirementPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
 model Requirement {
-  id        String  @id @default(cuid())
-  trackerId String
-  tracker   Tracker @relation(fields: [trackerId], references: [id], onDelete: Cascade)
+  id      String @id @default(cuid())
+  phaseId String
+  phase   Phase  @relation(fields: [phaseId], references: [id], onDelete: Cascade)
 
   title       String
   description String?
-  dueDate     DateTime?
+  priority    RequirementPriority @default(MEDIUM)
+
+  // The original commitment vs. a later renegotiated date -- both tracked
+  // (and both show up in the audit log when changed) rather than
+  // overwriting one with the other.
+  dueDate        DateTime?
+  revisedDueDate DateTime?
 
   // Set only by an explicit stage-move action (drag-and-drop / API call) --
   // never by ADO sync, which only updates LinkedWorkItem state. Nullable: a
@@ -148,10 +205,9 @@ model Requirement {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  linkedWorkItems  LinkedWorkItem[]
-  releaseNotes     ReleaseNote[]
-  statusEvents     StatusEvent[]
-  figmaReferences  FigmaReference[]
+  linkedWorkItems LinkedWorkItem[]
+  releaseNotes    ReleaseNote[]
+  figmaReferences FigmaReference[]
 }
 
 // A design file (or a specific frame/node in one) attached to a Requirement for
@@ -171,6 +227,8 @@ model FigmaReference {
   addedAt DateTime @default(now())
 }
 
+// A PBI (Product Backlog Item) linked from Azure DevOps -- a Requirement can
+// have several (see the two-way ADO integration).
 model LinkedWorkItem {
   id            String      @id @default(cuid())
   requirementId String
@@ -242,23 +300,25 @@ model DeliveryLog {
   attemptedAt DateTime @default(now())
 }
 
-model StatusEvent {
-  id            String      @id @default(cuid())
-  requirementId String
-  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
-
-  scope String // "requirement_stage" | "linked_item"
-  adoId Int? // set when scope = "linked_item"
-
-  fromStatus String? // linked_item: ADO state name. requirement_stage: stage name.
-  toStatus   String?
-  actor      String? // "system:eod_sync" | "admin" | future user id
-
+// Generic field-level audit trail -- every edit to Client/Phase/Requirement
+// (and stage moves, and linked-item ADO state changes) writes one row here.
+// entityType is a plain string ("client" | "phase" | "requirement" |
+// "linked_item") rather than an enum so new entity types don't need a migration.
+model AuditLog {
+  id         String   @id @default(cuid())
+  entityType String
+  entityId   String
+  field      String
+  oldValue   String?
+  newValue   String?
+  actor      String   @default("admin") // "system:eod_sync" | "admin" | future user id
   occurredAt DateTime @default(now())
+
+  @@index([entityType, entityId, occurredAt])
 }
 
 // One row per EOD sync run, for observability/debugging. Sync only updates
-// LinkedWorkItem state now -- it never moves a Requirement's stage (that's a
+// LinkedWorkItem state now -- it never moves anything's stage (that's a
 // manual action, see requirements.ts's PATCH /requirements/:id/stage).
 model SyncRun {
   id                 String    @id @default(cuid())

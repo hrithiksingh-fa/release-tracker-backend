@@ -21,7 +21,7 @@ releaseNotesRouter.get(
       orderBy: { generatedAt: "desc" },
       include: {
         requirement: {
-          include: { linkedWorkItems: true, tracker: { include: { client: true } } },
+          include: { linkedWorkItems: true, phase: { include: { client: true } } },
         },
       },
     });
@@ -35,7 +35,7 @@ releaseNotesRouter.get(
     const note = await prisma.releaseNote.findUnique({
       where: { id: req.params.id },
       include: {
-        requirement: { include: { linkedWorkItems: true, tracker: { include: { client: true } } } },
+        requirement: { include: { linkedWorkItems: true, phase: { include: { client: true } } } },
         deliveries: { orderBy: { attemptedAt: "desc" } },
       },
     });

@@ -54,14 +54,14 @@ export async function approveReleaseNote(releaseNoteId: string) {
 export async function sendReleaseNote(releaseNoteId: string) {
   const note = await prisma.releaseNote.findUniqueOrThrow({
     where: { id: releaseNoteId },
-    include: { requirement: { include: { linkedWorkItems: true, tracker: { include: { client: true } } } } },
+    include: { requirement: { include: { linkedWorkItems: true, phase: { include: { client: true } } } } },
   });
 
   if (note.status !== "APPROVED") {
     throw new Error(`Release note ${releaseNoteId} must be APPROVED before it can be sent (current: ${note.status}).`);
   }
 
-  const client = note.requirement.tracker.client;
+  const client = note.requirement.phase.client;
   if (!client.slackChannelId) {
     throw new Error(`Client "${client.name}" has no Slack channel configured.`);
   }

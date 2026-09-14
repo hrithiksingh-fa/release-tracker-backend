@@ -1,5 +1,6 @@
 import { prisma } from "../db.js";
 import { buildAdoClientFor, isAdoConfigured } from "./adoConnection.js";
+import { logChange } from "./auditService.js";
 
 export interface SyncResult {
   syncRunId: string;
@@ -22,7 +23,7 @@ export async function runEodSync(): Promise<SyncResult> {
 
   const clients = await prisma.client.findMany({
     include: {
-      trackers: {
+      phases: {
         include: {
           requirements: { include: { linkedWorkItems: true } },
         },
@@ -41,8 +42,8 @@ export async function runEodSync(): Promise<SyncResult> {
       continue;
     }
 
-    for (const tracker of client.trackers) {
-      for (const requirement of tracker.requirements) {
+    for (const phase of client.phases) {
+      for (const requirement of phase.requirements) {
         for (const li of requirement.linkedWorkItems) {
           try {
             const details = await adoClient.getWorkItem(li.adoId);
@@ -63,16 +64,7 @@ export async function runEodSync(): Promise<SyncResult> {
 
             if (changed) {
               linkedItemsUpdated++;
-              await prisma.statusEvent.create({
-                data: {
-                  requirementId: requirement.id,
-                  scope: "linked_item",
-                  adoId: li.adoId,
-                  fromStatus: li.adoState,
-                  toStatus: details.state,
-                  actor: "system:eod_sync",
-                },
-              });
+              await logChange("linked_item", li.id, "adoState", li.adoState, details.state, "system:eod_sync");
             }
           } catch (err) {
             errors.push(

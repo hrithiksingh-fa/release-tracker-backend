@@ -1,6 +1,7 @@
-// Seeds the shared Stage master list plus the two template workflows:
-//   - the single PROJECT-scope workflow (outer board)
-//   - the default REQUIREMENT-scope template (what new clients clone from)
+// Seeds the shared Stage master list plus the three template workflows:
+//   - the single scope=CLIENT workflow (outer board)
+//   - the default scope=PHASE template (what new clients clone for their phases)
+//   - the default scope=REQUIREMENT template (what new clients clone for their requirements)
 //
 // Run with: npx tsx prisma/seed.ts
 import { PrismaClient } from "@prisma/client";
@@ -16,22 +17,24 @@ async function upsertStage(name: string, opts: { color: string; isDoneStage?: bo
 }
 
 async function main() {
-  // Shared master list. "In Progress" and "Done" are deliberately reused by
-  // both workflows below, to demonstrate stages are a shared pool, not
-  // per-workflow copies.
+  // Shared master list. "In Progress" and "Done" are deliberately reused
+  // across all three workflows below, to demonstrate stages are a shared
+  // pool, not per-workflow copies.
   const stageNew = await upsertStage("New", { color: "#9aa1ac" });
   const stageInProgress = await upsertStage("In Progress", { color: "#5b8cff" });
   const stageOnHold = await upsertStage("On Hold", { color: "#e0a13a" });
   const stageDone = await upsertStage("Done", { color: "#33c17a", isDoneStage: true });
   const stageBacklog = await upsertStage("Backlog", { color: "#9aa1ac" });
   const stageInReview = await upsertStage("In Review", { color: "#a06be0" });
+  const stageOnboarding = await upsertStage("Onboarding", { color: "#33c1c1" });
+  const stageScaling = await upsertStage("Scaling", { color: "#c15e33" });
 
-  const existingProjectWorkflow = await prisma.workflow.findFirst({ where: { scope: "PROJECT" } });
-  if (!existingProjectWorkflow) {
+  const existingClientWorkflow = await prisma.workflow.findFirst({ where: { scope: "CLIENT" } });
+  if (!existingClientWorkflow) {
     await prisma.workflow.create({
       data: {
         name: "Projects",
-        scope: "PROJECT",
+        scope: "CLIENT",
         isTemplate: true,
         stages: {
           create: [
@@ -43,9 +46,31 @@ async function main() {
         },
       },
     });
-    console.log("Created PROJECT workflow: Projects (New -> In Progress -> On Hold -> Done)");
+    console.log("Created CLIENT workflow: Projects (New -> In Progress -> On Hold -> Done)");
   } else {
-    console.log("PROJECT workflow already exists, skipping.");
+    console.log("CLIENT workflow already exists, skipping.");
+  }
+
+  const existingPhaseTemplate = await prisma.workflow.findFirst({ where: { scope: "PHASE", isTemplate: true } });
+  if (!existingPhaseTemplate) {
+    await prisma.workflow.create({
+      data: {
+        name: "Default Phase Workflow",
+        scope: "PHASE",
+        isTemplate: true,
+        stages: {
+          create: [
+            { stageId: stageOnboarding.id, position: 1 },
+            { stageId: stageInProgress.id, position: 2 },
+            { stageId: stageScaling.id, position: 3 },
+            { stageId: stageDone.id, position: 4 },
+          ],
+        },
+      },
+    });
+    console.log("Created PHASE template: Default Phase Workflow (Onboarding -> In Progress -> Scaling -> Done)");
+  } else {
+    console.log("Default PHASE template already exists, skipping.");
   }
 
   const existingRequirementTemplate = await prisma.workflow.findFirst({

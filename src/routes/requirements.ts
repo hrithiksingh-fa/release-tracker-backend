@@ -1,21 +1,23 @@
 import { Router } from "express";
 import { z } from "zod";
+import { RequirementPriority } from "@prisma/client";
 import { prisma } from "../db.js";
 import { asyncRoute } from "../middleware/errorHandler.js";
 import { buildAdoClientFor } from "../services/adoConnection.js";
 import * as figma from "../integrations/figma/client.js";
 import { parseFigmaUrl } from "../integrations/figma/urlParsing.js";
 import { generateDraftReleaseNote } from "../services/releaseNoteService.js";
+import { logDiff } from "../services/auditService.js";
 
 export const requirementsRouter = Router();
 
 const stageInclude = { stage: { include: { stage: true } } } as const;
 
 requirementsRouter.get(
-  "/trackers/:trackerId/requirements",
+  "/phases/:phaseId/requirements",
   asyncRoute(async (req, res) => {
     const requirements = await prisma.requirement.findMany({
-      where: { trackerId: req.params.trackerId },
+      where: { phaseId: req.params.phaseId },
       orderBy: { createdAt: "desc" },
       include: {
         linkedWorkItems: true,
@@ -31,29 +33,32 @@ requirementsRouter.get(
 const createRequirementSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
+  priority: z.nativeEnum(RequirementPriority).optional(),
   dueDate: z.string().datetime().optional(),
+  revisedDueDate: z.string().datetime().optional(),
 });
 
 requirementsRouter.post(
-  "/trackers/:trackerId/requirements",
+  "/phases/:phaseId/requirements",
   asyncRoute(async (req, res) => {
     const body = createRequirementSchema.parse(req.body);
-    const { dueDate, ...rest } = body;
+    const { dueDate, revisedDueDate, ...rest } = body;
 
     // New requirements default to the first stage of their client's own
     // requirement workflow -- the leftmost board column, same principle as a
-    // new Client starting at the PROJECT workflow's first stage.
-    const tracker = await prisma.tracker.findUniqueOrThrow({
-      where: { id: req.params.trackerId },
+    // new Client starting at the CLIENT workflow's first stage.
+    const phase = await prisma.phase.findUniqueOrThrow({
+      where: { id: req.params.phaseId },
       include: { client: { include: { requirementWorkflow: { include: { stages: { orderBy: { position: "asc" } } } } } } },
     });
-    const firstStage = tracker.client.requirementWorkflow?.stages[0];
+    const firstStage = phase.client.requirementWorkflow?.stages[0];
 
     const requirement = await prisma.requirement.create({
       data: {
         ...rest,
         dueDate: dueDate ? new Date(dueDate) : undefined,
-        trackerId: req.params.trackerId,
+        revisedDueDate: revisedDueDate ? new Date(revisedDueDate) : undefined,
+        phaseId: req.params.phaseId,
         stageId: firstStage?.id,
       },
       include: stageInclude,
@@ -70,9 +75,8 @@ requirementsRouter.get(
       include: {
         linkedWorkItems: true,
         releaseNotes: { orderBy: { version: "desc" } },
-        statusEvents: { orderBy: { occurredAt: "desc" } },
         figmaReferences: { orderBy: { addedAt: "desc" } },
-        tracker: {
+        phase: {
           include: {
             client: {
               include: {
@@ -91,16 +95,26 @@ requirementsRouter.get(
   })
 );
 
+const AUDITED_FIELDS = ["title", "description", "priority", "dueDate", "revisedDueDate"] as const;
+
 requirementsRouter.patch(
   "/requirements/:id",
   asyncRoute(async (req, res) => {
     const body = createRequirementSchema.partial().parse(req.body);
-    const { dueDate, ...rest } = body;
+    const { dueDate, revisedDueDate, ...rest } = body;
+
+    const before = await prisma.requirement.findUniqueOrThrow({ where: { id: req.params.id } });
     const requirement = await prisma.requirement.update({
       where: { id: req.params.id },
-      data: { ...rest, ...(dueDate !== undefined ? { dueDate: dueDate ? new Date(dueDate) : null } : {}) },
+      data: {
+        ...rest,
+        ...(dueDate !== undefined ? { dueDate: dueDate ? new Date(dueDate) : null } : {}),
+        ...(revisedDueDate !== undefined ? { revisedDueDate: revisedDueDate ? new Date(revisedDueDate) : null } : {}),
+      },
       include: stageInclude,
     });
+
+    await logDiff("requirement", requirement.id, before, requirement, AUDITED_FIELDS);
     res.json(requirement);
   })
 );
@@ -129,15 +143,13 @@ requirementsRouter.patch(
       include: stageInclude,
     });
 
-    await prisma.statusEvent.create({
-      data: {
-        requirementId: req.params.id,
-        scope: "requirement_stage",
-        fromStatus: previous.stage?.stage.name ?? null,
-        toStatus: target.stage.name,
-        actor: "admin",
-      },
-    });
+    await logDiff(
+      "requirement",
+      requirement.id,
+      { stage: previous.stage?.stage.name ?? null },
+      { stage: target.stage.name },
+      ["stage"]
+    );
 
     let releaseNoteWarning: string | null = null;
     if (target.stage.isDoneStage) {
@@ -160,11 +172,12 @@ requirementsRouter.delete(
   })
 );
 
-// --- Linked work items -----------------------------------------------------
-// Two ways to attach an ADO work item to a Requirement:
+// --- Linked PBIs (Product Backlog Items, via Azure DevOps) ------------------
+// Two ways to attach one to a Requirement:
 //  1. Link an existing one by ADO id (fetches its current details immediately).
 //  2. Create a brand new PBI in ADO and link the returned id -- the "push" side
 //     of the two-way integration.
+// A Requirement can have several linked PBIs.
 
 const linkExistingSchema = z.object({ adoId: z.number().int().positive() });
 const createInAdoSchema = z.object({
@@ -178,11 +191,11 @@ requirementsRouter.post(
   asyncRoute(async (req, res) => {
     const requirement = await prisma.requirement.findUnique({
       where: { id: req.params.id },
-      include: { tracker: { include: { client: true } } },
+      include: { phase: { include: { client: true } } },
     });
     if (!requirement) return res.status(404).json({ error: "Requirement not found" });
 
-    const ado = buildAdoClientFor(requirement.tracker.client);
+    const ado = buildAdoClientFor(requirement.phase.client);
 
     let adoId: number;
     if (req.body?.adoId) {
@@ -190,7 +203,7 @@ requirementsRouter.post(
     } else {
       const created = await ado.createWorkItem({
         ...createInAdoSchema.parse(req.body),
-        areaPath: requirement.tracker.client.adoAreaPath!,
+        areaPath: requirement.phase.client.adoAreaPath!,
       });
       adoId = created.adoId;
     }

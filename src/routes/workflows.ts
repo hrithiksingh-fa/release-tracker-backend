@@ -7,6 +7,12 @@ import { cloneWorkflow } from "../services/workflowService.js";
 
 export const workflowsRouter = Router();
 
+const workflowInclude = {
+  stages: { orderBy: { position: "asc" as const }, include: { stage: true } },
+  clientUsingAsPhaseWorkflow: true,
+  clientUsingAsRequirementWorkflow: true,
+} as const;
+
 workflowsRouter.get(
   "/workflows",
   asyncRoute(async (req, res) => {
@@ -14,7 +20,7 @@ workflowsRouter.get(
     const workflows = await prisma.workflow.findMany({
       where: scope ? { scope: scope.toUpperCase() as WorkflowScope } : undefined,
       orderBy: { createdAt: "asc" },
-      include: { stages: { orderBy: { position: "asc" }, include: { stage: true } }, ownerClient: true },
+      include: workflowInclude,
     });
     res.json(workflows);
   })
@@ -23,29 +29,51 @@ workflowsRouter.get(
 workflowsRouter.get(
   "/workflows/:id",
   asyncRoute(async (req, res) => {
-    const workflow = await prisma.workflow.findUnique({
-      where: { id: req.params.id },
-      include: { stages: { orderBy: { position: "asc" }, include: { stage: true } }, ownerClient: true },
-    });
+    const workflow = await prisma.workflow.findUnique({ where: { id: req.params.id }, include: workflowInclude });
     if (!workflow) return res.status(404).json({ error: "Workflow not found" });
     res.json(workflow);
   })
 );
 
+const createSchema = z.object({
+  name: z.string().min(1),
+  scope: z.nativeEnum(WorkflowScope),
+  isTemplate: z.boolean().optional(),
+});
+
+// Create a workflow from scratch (no stages yet -- add them via
+// POST /workflows/:id/stages) rather than by cloning.
+workflowsRouter.post(
+  "/workflows",
+  asyncRoute(async (req, res) => {
+    const body = createSchema.parse(req.body);
+    const workflow = await prisma.workflow.create({ data: body, include: workflowInclude });
+    res.status(201).json(workflow);
+  })
+);
+
 const cloneSchema = z.object({
   name: z.string().min(1),
-  ownerClientId: z.string().optional(),
   isTemplate: z.boolean().optional(),
 });
 
 // "Create or copy from another project" -- clones another workflow's stage
 // sequence (same Stage references, same order) into a brand-new Workflow.
+// Attaching it to a client is a separate step (PATCH /clients/:id/workflows).
 workflowsRouter.post(
   "/workflows/:id/clone",
   asyncRoute(async (req, res) => {
     const body = cloneSchema.parse(req.body);
     const cloned = await cloneWorkflow({ sourceWorkflowId: req.params.id, ...body });
     res.status(201).json(cloned);
+  })
+);
+
+workflowsRouter.delete(
+  "/workflows/:id",
+  asyncRoute(async (req, res) => {
+    await prisma.workflow.delete({ where: { id: req.params.id } });
+    res.status(204).send();
   })
 );
 
@@ -90,10 +118,7 @@ workflowsRouter.put(
         prisma.workflowStage.update({ where: { id }, data: { position: index + 1 } })
       )
     );
-    const workflow = await prisma.workflow.findUnique({
-      where: { id: req.params.id },
-      include: { stages: { orderBy: { position: "asc" }, include: { stage: true } } },
-    });
+    const workflow = await prisma.workflow.findUnique({ where: { id: req.params.id }, include: workflowInclude });
     res.json(workflow);
   })
 );

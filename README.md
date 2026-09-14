@@ -6,29 +6,46 @@ API + scheduled sync + integrations for the release-tracker platform. Pairs with
 ## Data model
 
 ```
-Client (one Slack channel, one ADO org/project/area path connection)
- └─ Tracker (a sheet)
-     └─ Requirement (a row — a client-facing ask/delta)
-         ├─ status: DERIVED — Not Started / In Progress / Done
-         │    Done only once every linked work item reaches a terminal ADO state
-         ├─ LinkedWorkItem[] (1..N Azure DevOps work items)
-         └─ ReleaseNote[] (draft → approved → sent, versioned)
+Client (one Slack channel, one ADO org/project/area path connection,
+        description/productOwner/deliveryDate, Module[] multi-select)
+ └─ Phase (a client's lifecycle stage, e.g. Onboarding / Scaling 1 — has its
+    │      own description + deliveryDate)
+    └─ Requirement (a row — a client-facing ask/delta)
+        ├─ priority: LOW / MEDIUM / HIGH / URGENT
+        ├─ dueDate (original commitment) + revisedDueDate (renegotiated)
+        ├─ LinkedWorkItem[] (1..N PBIs -- Product Backlog Items, via Azure DevOps)
+        ├─ FigmaReference[] (design links)
+        └─ ReleaseNote[] (draft → approved → sent, versioned)
+
+Stage / Workflow / WorkflowStage: a shared Stage master list, and three kinds
+of Workflow (scope=CLIENT: one global; scope=PHASE and scope=REQUIREMENT:
+one per client, cloned from a template or another client's). Client,
+Phase, and Requirement each carry a stageId into their respective workflow.
+Stage moves are always manual (see syncService.ts) -- moving a Requirement
+into a stage flagged isDoneStage is what triggers release-note generation.
+
+Module: a reusable "what this client uses" tag, managed from the admin panel.
+
+AuditLog: generic field-level change log -- every edit to Client/Phase/
+Requirement (and every stage move, and every ADO-state change picked up by
+sync) writes rows here. Query via GET /audit-logs?entityType=&entityId=.
 ```
 
 See `prisma/schema.prisma` for the full schema.
 
 ## Pipeline
 
-- **EOD sync** (`src/jobs/eodSync.ts`, cron via `EOD_SYNC_CRON`): pulls current
-  state for every linked ADO work item, recomputes each requirement's derived
-  status, and generates a **draft** release note for any requirement that just
-  became fully Done (`src/services/syncService.ts`).
+- **EOD sync** (`src/jobs/eodSync.ts`, cron via `EOD_SYNC_CRON`): refreshes
+  cached state for every linked PBI and logs an audit entry for anything that
+  changed (`src/services/syncService.ts`). It never moves anything's stage.
 - **Release note generation** (`src/lib/releaseNotes/`): ported from the
   `ado-release-notes-toolkit` Python scripts — section-splitting, screen/category
   classification, duplicate detection — merged across all of a requirement's
-  linked work items into one note, then run through an LLM rewrite pass
+  linked PBIs into one note, then run through an LLM rewrite pass
   (`src/lib/releaseNotes/rewrite.ts`, Claude via `ANTHROPIC_API_KEY`; falls back
   to the raw merged text if unset, so the pipeline still runs without it).
+  Triggered by moving a Requirement into a stage flagged `isDoneStage`
+  (`PATCH /requirements/:id/stage`) — fully manual, never by sync.
 - **Review → send**: nothing reaches Slack automatically. A generated note sits
   in `DRAFT` until approved (`POST /release-notes/:id/approve`) and sent
   (`POST /release-notes/:id/send`), which posts to the client's Slack channel
@@ -51,7 +68,10 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 docker compose up -d        # starts local Postgres
 npm install
-npx prisma migrate dev      # creates the schema
+npx prisma db push          # syncs the schema (schema is iterating fast right
+                             # now -- switch to `prisma migrate dev` for a real
+                             # migration history once it stabilizes)
+npm run prisma:seed         # seeds the Stage master + the three template workflows
 npm run dev                 # http://localhost:4000
 ```
 
@@ -77,11 +97,11 @@ channel to post into.
 
 ## What's stubbed / needs your input to fully exercise
 
-- **Docker isn't installed** on the machine this was scaffolded on, so the
-  Postgres container and `prisma migrate dev` haven't been run here — install
-  Docker Desktop (or Colima) and follow Setup above.
 - **ANTHROPIC_API_KEY / SLACK_BOT_TOKEN** are unset — the pipeline runs without
   them (release notes just skip the plain-language rewrite; sending fails with
   a clear error until a token is set).
 - **ADO service hooks** (real-time push from Azure DevOps) aren't wired up —
   v1 relies on the EOD poll, matching what you asked for.
+- **No migration history right now** — schema is managed via `prisma db push`
+  while it's still moving fast; generate a real `prisma migrate dev` history
+  before any non-local deployment.
