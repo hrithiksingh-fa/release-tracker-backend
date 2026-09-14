@@ -9,10 +9,12 @@ import type { Client, WorkflowStage, Stage, Workflow, Module } from "@prisma/cli
 
 export const clientsRouter = Router();
 
+type WorkflowWithStages = Workflow & { stages: (WorkflowStage & { stage: Stage })[] };
+
 type ClientWithRelations = Client & {
   currentStage?: (WorkflowStage & { stage: Stage }) | null;
-  phaseWorkflow?: Workflow | null;
-  requirementWorkflow?: Workflow | null;
+  phaseWorkflow?: WorkflowWithStages | null;
+  requirementWorkflow?: WorkflowWithStages | null;
   modules?: Module[];
 };
 
@@ -21,10 +23,14 @@ function sanitize(client: ClientWithRelations) {
   return { ...rest, adoPatConfigured: Boolean(adoPatEncrypted) };
 }
 
+const workflowWithStages = {
+  include: { stages: { orderBy: { position: "asc" as const }, include: { stage: true } } },
+};
+
 const clientInclude = {
   currentStage: { include: { stage: true } },
-  phaseWorkflow: true,
-  requirementWorkflow: true,
+  phaseWorkflow: workflowWithStages,
+  requirementWorkflow: workflowWithStages,
   modules: true,
 } as const;
 
