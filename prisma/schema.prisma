@@ -51,10 +51,11 @@ model Client {
   slackChannelName String?
 
   // Azure DevOps connection for this client's board (items pulled through it
-  // are labeled "PBI" -- Product Backlog Item -- in the UI).
-  adoOrgUrl       String? // e.g. https://dev.azure.com/myorg
-  adoProject      String?
-  adoAreaPath     String?
+  // are labeled "PBI" -- Product Backlog Item -- in the UI). Just the project
+  // URL + a PAT -- org and project name are parsed from the URL (see
+  // src/integrations/ado/urlParsing.ts), and new PBIs default to an area path
+  // equal to the project name rather than asking for it separately.
+  adoProjectUrl   String? // e.g. https://dev.azure.com/myorg/myproject
   adoPatEncrypted String? // encrypted at rest, see src/lib/crypto.ts
   // Which ADO [System.State] values count as "terminal / done" for this client's
   // board -- boards use different workflow names (Done, Closed, Resolved...).
@@ -82,8 +83,10 @@ model Client {
   phases Phase[]
 }
 
-// A product module a client uses (e.g. "Reporting", "Bulk Upload") -- shown as
-// a multi-select on the client form. Managed from the admin panel.
+// A product module (e.g. "Reporting", "Bulk Upload") -- shared across every
+// client/phase/requirement, not owned by one client. Used as a multi-select
+// on the client form and a single classification on each requirement.
+// Managed from the admin panel.
 model Module {
   id          String  @id @default(cuid())
   name        String  @unique
@@ -92,7 +95,23 @@ model Module {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  clients Client[]
+  clients      Client[]
+  requirements Requirement[]
+}
+
+// A requirement classification (default: "Feasible" / "Not Feasible").
+// showByDefault=false categories (Not Feasible) are hidden from a phase's
+// requirement list/board unless the viewer switches on "show not feasible".
+// Managed from the admin panel.
+model Category {
+  id            String  @id @default(cuid())
+  name          String  @unique
+  showByDefault Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  requirements Requirement[]
 }
 
 model Stage {
@@ -173,13 +192,6 @@ model Phase {
   @@unique([clientId, name])
 }
 
-enum RequirementPriority {
-  LOW
-  MEDIUM
-  HIGH
-  URGENT
-}
-
 model Requirement {
   id      String @id @default(cuid())
   phaseId String
@@ -187,13 +199,25 @@ model Requirement {
 
   title       String
   description String?
-  priority    RequirementPriority @default(MEDIUM)
 
-  // The original commitment vs. a later renegotiated date -- both tracked
-  // (and both show up in the audit log when changed) rather than
-  // overwriting one with the other.
-  dueDate        DateTime?
-  revisedDueDate DateTime?
+  // P0 (highest) .. P10 (lowest) -- the number itself is the sort key, so
+  // "sort by priority" is just ORDER BY priority ASC. Default P5, a neutral
+  // middle rather than implying urgency either way.
+  priority Int @default(5)
+
+  moduleId   String?
+  module     Module?   @relation(fields: [moduleId], references: [id])
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id])
+
+  productOwner     String?
+  asanaLink        String? // one Asana task per requirement (unlike PBIs, which allow many)
+  releaseNotesText String? // manual supplementary note, separate from the auto-generated ReleaseNote pipeline
+  generalRemarks   String?
+
+  // Renegotiated dates show up in the audit timeline when this changes --
+  // no separate "revised" field needed.
+  deliveryDate DateTime?
 
   // Set only by an explicit stage-move action (drag-and-drop / API call) --
   // never by ADO sync, which only updates LinkedWorkItem state. Nullable: a
@@ -208,6 +232,21 @@ model Requirement {
   linkedWorkItems LinkedWorkItem[]
   releaseNotes    ReleaseNote[]
   figmaReferences FigmaReference[]
+  comments        Comment[]
+}
+
+// Unlimited free-form remarks on a Requirement -- a Jira-style comment
+// thread, shown below the description. Each addition also writes an
+// AuditLog row (activityType="comment") so it appears in the timeline too.
+model Comment {
+  id            String      @id @default(cuid())
+  requirementId String
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  body   String
+  author String @default("admin")
+
+  createdAt DateTime @default(now())
 }
 
 // A design file (or a specific frame/node in one) attached to a Requirement for
@@ -301,18 +340,25 @@ model DeliveryLog {
 }
 
 // Generic field-level audit trail -- every edit to Client/Phase/Requirement
-// (and stage moves, and linked-item ADO state changes) writes one row here.
-// entityType is a plain string ("client" | "phase" | "requirement" |
-// "linked_item") rather than an enum so new entity types don't need a migration.
+// (and creations, stage moves, comments, PBI/Figma link changes, and
+// linked-item ADO state changes) writes one row here. entityType is a plain
+// string ("client" | "phase" | "requirement" | "linked_item") rather than an
+// enum so new entity types don't need a migration; same for activityType.
+//
+// A Client's timeline rolls up its Phases' and their Requirements' rows too
+// (see auditService.getRollup) -- entityType/entityId on each row always
+// name the actual entity that changed, so the rollup is just "find every
+// descendant's rows and group them back into a tree."
 model AuditLog {
-  id         String   @id @default(cuid())
-  entityType String
-  entityId   String
-  field      String
-  oldValue   String?
-  newValue   String?
-  actor      String   @default("admin") // "system:eod_sync" | "admin" | future user id
-  occurredAt DateTime @default(now())
+  id           String   @id @default(cuid())
+  entityType   String
+  entityId     String
+  activityType String   @default("update") // "create" | "update" | "stage_change" | "comment" | "pbi" | "figma"
+  field        String
+  oldValue     String?
+  newValue     String?
+  actor        String   @default("admin") // "system:eod_sync" | "admin" | future user id
+  occurredAt   DateTime @default(now())
 
   @@index([entityType, entityId, occurredAt])
 }

@@ -10,6 +10,7 @@ import { figmaRouter } from "./routes/figma.js";
 import { stagesRouter } from "./routes/stages.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { modulesRouter } from "./routes/modules.js";
+import { categoriesRouter } from "./routes/categories.js";
 import { auditLogsRouter } from "./routes/auditLogs.js";
 import { requireAdmin } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/errorHandler.js";
@@ -32,6 +33,7 @@ export function createApp() {
   app.use("/", stagesRouter);
   app.use("/", workflowsRouter);
   app.use("/", modulesRouter);
+  app.use("/", categoriesRouter);
   app.use("/", auditLogsRouter);
 
   app.use(errorHandler);

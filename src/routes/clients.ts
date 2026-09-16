@@ -4,7 +4,7 @@ import { prisma } from "../db.js";
 import { encryptSecret } from "../lib/crypto.js";
 import { asyncRoute } from "../middleware/errorHandler.js";
 import { getClientWorkflow, getDefaultTemplate, cloneWorkflow } from "../services/workflowService.js";
-import { logDiff } from "../services/auditService.js";
+import { logDiff, logChange } from "../services/auditService.js";
 import type { Client, WorkflowStage, Stage, Workflow, Module } from "@prisma/client";
 
 export const clientsRouter = Router();
@@ -41,9 +41,7 @@ const AUDITED_FIELDS = [
   "deliveryDate",
   "slackChannelId",
   "slackChannelName",
-  "adoOrgUrl",
-  "adoProject",
-  "adoAreaPath",
+  "adoProjectUrl",
   "adoDoneStates",
 ] as const;
 
@@ -54,9 +52,7 @@ const createSchema = z.object({
   deliveryDate: z.string().datetime().optional(),
   slackChannelId: z.string().optional(),
   slackChannelName: z.string().optional(),
-  adoOrgUrl: z.string().url().optional(),
-  adoProject: z.string().optional(),
-  adoAreaPath: z.string().optional(),
+  adoProjectUrl: z.string().url().optional(),
   adoPat: z.string().optional(), // plaintext in, encrypted before storage
   adoDoneStates: z.array(z.string()).optional(),
   moduleIds: z.array(z.string()).optional(),
@@ -129,6 +125,7 @@ clientsRouter.post(
       },
       include: clientInclude,
     });
+    await logChange("client", client.id, "client", null, client.name, "admin", "create");
     res.status(201).json(sanitize(client));
   })
 );
@@ -178,7 +175,15 @@ clientsRouter.patch(
       include: clientInclude,
     });
 
-    await logDiff("client", client.id, { stage: before.currentStage?.stage.name ?? null }, { stage: target.stage.name }, ["stage"]);
+    await logDiff(
+      "client",
+      client.id,
+      { stage: before.currentStage?.stage.name ?? null },
+      { stage: target.stage.name },
+      ["stage"],
+      "admin",
+      "stage_change"
+    );
     res.json(sanitize(client));
   })
 );

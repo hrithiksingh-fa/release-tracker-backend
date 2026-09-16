@@ -96,6 +96,18 @@ async function main() {
   } else {
     console.log("Default REQUIREMENT template already exists, skipping.");
   }
+
+  await prisma.category.upsert({
+    where: { name: "Feasible" },
+    update: {},
+    create: { name: "Feasible", showByDefault: true },
+  });
+  await prisma.category.upsert({
+    where: { name: "Not Feasible" },
+    update: {},
+    create: { name: "Not Feasible", showByDefault: false },
+  });
+  console.log("Ensured default categories: Feasible (shown), Not Feasible (hidden by default)");
 }
 
 main()

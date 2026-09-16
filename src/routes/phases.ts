@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { asyncRoute } from "../middleware/errorHandler.js";
-import { logDiff } from "../services/auditService.js";
+import { logDiff, logChange } from "../services/auditService.js";
 
 export const phasesRouter = Router();
 
@@ -48,6 +48,7 @@ phasesRouter.post(
       },
       include: stageInclude,
     });
+    await logChange("phase", phase.id, "phase", null, phase.name, "admin", "create");
     res.status(201).json(phase);
   })
 );
@@ -109,7 +110,15 @@ phasesRouter.patch(
       include: stageInclude,
     });
 
-    await logDiff("phase", phase.id, { stage: before.stage?.stage.name ?? null }, { stage: target.stage.name }, ["stage"]);
+    await logDiff(
+      "phase",
+      phase.id,
+      { stage: before.stage?.stage.name ?? null },
+      { stage: target.stage.name },
+      ["stage"],
+      "admin",
+      "stage_change"
+    );
     res.json(phase);
   })
 );

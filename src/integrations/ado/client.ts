@@ -12,9 +12,11 @@ const DEV_START_FIELD_CANDIDATES = ["Microsoft.VSTS.Common.ActivatedDate", "Cust
 export class AdoClient {
   private http: AxiosInstance;
   private project: string;
+  private areaPath: string;
 
   constructor(config: AdoConnectionConfig) {
     this.project = config.project;
+    this.areaPath = config.areaPath;
     const token = Buffer.from(`:${config.pat}`).toString("base64");
     this.http = axios.create({
       baseURL: `${config.orgUrl.replace(/\/$/, "")}/${encodeURIComponent(config.project)}/_apis`,
@@ -73,11 +75,10 @@ export class AdoClient {
     workItemType: string;
     title: string;
     description?: string;
-    areaPath: string;
   }): Promise<AdoWorkItemDetails> {
     const patchDoc = [
       { op: "add", path: "/fields/System.Title", value: params.title },
-      { op: "add", path: "/fields/System.AreaPath", value: params.areaPath },
+      { op: "add", path: "/fields/System.AreaPath", value: this.areaPath },
       ...(params.description
         ? [{ op: "add", path: "/fields/System.Description", value: params.description }]
         : []),
